@@ -1,0 +1,116 @@
+import numpy as np
+from PIL import Image
+import os
+import string
+from pickle import dump
+from pickle import load
+from keras.applications.xception import Xception
+from keras.applications.xception import preprocess_input
+from keras.preprocessing.image import load_img
+from keras.preprocessing.image import img_to_array
+from keras.preprocessing.text import Tokenizer
+from keras.preprocessing.sequence import pad_sequences
+from keras.utils import to_categorical
+from keras.layers.merge import add
+from keras.models import Model, load_model
+from keras.layers import Input, Dense, LSTM, Embedding, Dropout
+
+# Load the document file into memory
+def load_fp(filename):
+    file = open(filename, 'r')
+    text = file.read()
+    file.close()
+    return text
+
+# Load a pre-defined list of photo identifiers
+def load_set(filename):
+    doc = load_fp(filename)
+    dataset = list()
+    for line in doc.split("\n"):
+        if len(line) < 1:
+            continue
+        identifier = line.split('.')[0]
+        dataset.append(identifier)
+    return set(dataset)
+
+# Load clean descriptions into memory
+def load_clean_descriptions(filename, dataset):
+    doc = load_fp(filename)
+    descriptions = dict()
+    for line in doc.split("\n"):
+        tokens = line.split()
+        image_id, image_desc = tokens[0], tokens[1:]
+        if image_id in dataset:
+            if image_id not in descriptions:
+                descriptions[image_id] = list()
+            desc = 'tartseq ' '.join(image_desc) + 'ndseq'
+            descriptions[image_id].append(desc)
+    return descriptions
+
+# Load photo features
+def load_photo_features(filename, dataset):
+    all_features = load(open(filename, "rb"))
+    features = {k: all_features[k] for k in dataset}
+    return features
+
+# Define the captioning model
+def define_model(vocab_size, max_length):
+    inputs1 = Input(shape=(2048,))
+    fe1 = Dropout(0.5)(inputs1)
+    fe2 = Dense(256, activation='relu')(fe1)
+    inputs2 = Input(shape=(max_length,))
+    se1 = Embedding(vocab_size, 256, mask_zero=True)(inputs2)
+    se2 = Dropout(0.5)(se1)
+    se3 = LSTM(256)(se2)
+    decoder1 = add([fe2, se3])
+    decoder2 = Dense(256, activation='relu')(decoder1)
+    outputs = Dense(vocab_size, activation='softmax')(decoder2)
+    model = Model(inputs=[inputs1, inputs2], outputs=outputs)
+    model.compile(loss='categorical_crossentropy', optimizer='adam')
+    return model
+
+# Generate a description for an image
+def generate_desc(model, tokenizer, photo, max_length):
+    in_img, in_seq = photo, tokenizer.texts_to_sequences(['startseq'])[0]
+    for i in range(max_length):
+        yhat = model.predict([in_img, in_seq], verbose=0)
+        yhat = np.argmax(yhat)
+        word = word_for_id(yhat, tokenizer)
+        if word is None:
+            break
+        in_seq = np.append(in_seq, yhat)
+        if word == 'endseq':
+            break
+    final = [word_for_id(i, tokenizer) for i in in_seq]
+    final = '.join([w for w in final if w not in ['startseq', 'endseq']])
+    return final
+
+# Map an integer to a word
+def word_for_id(integer, tokenizer):
+    for word, index in tokenizer.word_index.items():
+        if index == integer:
+            return word
+    return None
+
+# Train the model
+def train(model, epochs, dataset, descriptions, features, tokenizer, max_length):
+    for i in range(epochs):
+        for key, desc_list in descriptions.items():
+            img = features[key]
+            input_img, input_seq, output_word = create_sequences(tokenizer, max_length, desc_list, img)
+            inputs, outputs = list(), list()
+            for x in input_seq:
+                inputs.append([img, x])
+                outputs.append(output_word)
+            inputs, outputs = np.array(inputs), np.array(outputs)
+            outputs = to_categorical(outputs, num_classes=len(tokenizer.word_index) + 1)
+            model.fit(inputs, outputs, epochs=1, batch_size=1, verbose=2)
+
+# Create sequences of images, input sequences, and output words for an image
+def create_sequences(tokenizer, max_length, desc_list, img):
+    input_img, input_seq, output_word = list(), list(), list()
+    for desc in desc_list:
+        for i in range(1, len(desc)):
+            in_seq, out_seq = desc[:i], desc[i]
+            in_seq = tokenizer.texts_to_sequences([in_seq])[0]
+            out_seq
